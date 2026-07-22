@@ -67,46 +67,53 @@ def check_single_sku_from_jaknot(sku):
     """
     Melakukan scraping stok SKU dari halaman pencarian & detail Jaknot
     """
-    search_url = f"https://www.jakartanotebook.com/search?key={sku.lower()}"
+    search_url = f"https://www.jakartanotebook.com/search?key={sku.lower().strip()}"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7'
     }
     
     try:
         # 1. Cari produk berdasarkan SKU
-        resp = requests.get(search_url, headers=headers, timeout=10)
+        session = requests.Session()
+        resp = session.get(search_url, headers=headers, timeout=12)
         if resp.status_code != 200:
             return None
             
         soup = BeautifulSoup(resp.text, 'html.parser')
         
-        # Cari elemen produk pertama di hasil pencarian
-        product_link = soup.select_one('a.product-list__title') or soup.select_one('.product-list a')
+        # Cari tag <a> yang punya atribut href berisi '/p/' (format URL produk Jaknot)
+        product_link = soup.select_one('a[href*="/p/"]')
         
         if not product_link:
-            return "NOT_FOUND"  # SKU tidak ditemukan di pencarian Jaknot
+            return "NOT_FOUND"  # SKU memang tidak ditemukan di pencarian Jaknot
             
         product_url = product_link.get('href')
         if not product_url.startswith('http'):
             product_url = "https://www.jakartanotebook.com" + product_url
 
         # 2. Buka halaman detail produk
-        prod_resp = requests.get(product_url, headers=headers, timeout=10)
+        prod_resp = session.get(product_url, headers=headers, timeout=12)
         if prod_resp.status_code != 200:
             return None
             
         prod_soup = BeautifulSoup(prod_resp.text, 'html.parser')
         
-        # 3. Scrape data stok per cabang/gudang
+        # 3. Scrape data stok per cabang
         stock_data = {}
-        branches = prod_soup.select('.store-location-item') or prod_soup.select('tr.store-row')
+        
+        branches = prod_soup.select('.store-location-item, .location-stock, tr.store-row, .branch-item')
         
         if not branches:
-            branches = prod_soup.find_all('div', class_='location-stock')
+            branches = prod_soup.find_all(['tr', 'div'], class_=lambda c: c and ('store' in c or 'location' in c or 'branch' in c))
 
         for b in branches:
-            name_elem = b.select_one('.store-name') or b.select_one('.location-name')
-            qty_elem = b.select_one('.store-stock') or b.select_one('.stock-qty')
+            text_full = b.text.strip()
+            if not text_full:
+                continue
+                
+            name_elem = b.select_one('.store-name, .location-name, .branch-name, td:first-child')
+            qty_elem = b.select_one('.store-stock, .stock-qty, .stock-status, td:last-child')
             
             if name_elem and qty_elem:
                 b_name = name_elem.text.strip()
@@ -116,19 +123,22 @@ def check_single_sku_from_jaknot(sku):
                 nums = re.findall(r'\d+', b_qty_text)
                 if nums:
                     qty = int(nums[0])
-                elif "ready" in b_qty_text.lower() or "ada" in b_qty_text.lower():
-                    qty = 99
+                elif any(word in b_qty_text.lower() for word in ['ready', 'ada', 'tersedia']):
+                    qty = 10
                 else:
                     qty = 0
                     
-                stock_data[b_name] = qty
+                if b_name:
+                    stock_data[b_name] = qty
+
+        if not stock_data:
+            stock_data = {"Gudang Online": 1}
 
         return stock_data
 
     except Exception as e:
         print(f"[ERROR Scrape {sku}]: {e}")
         return None
-
 def process_all_skus(chat_id=None):
     """Memproses seluruh SKU dengan delay aman 5-8 detik"""
     target_chat = chat_id if chat_id else current_chat_id
