@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 # ==========================================
 TELEGRAM_TOKEN = "8671011621:AAGOyNiVNP90fkY-D_4DHitQKGTWBdRxKz0"
 CSV_FILE = "daftar_sku-v2.csv"
+USERS_FILE = "registered_users.txt"  # File untuk menyimpan Chat ID Telegram
 
 # Daftar Cabang Acuan Jaknot
 LOCATIONS = [
@@ -23,12 +24,25 @@ LOCATIONS = [
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 user_states = {}
-is_auto_active = True  # Status awal otomatisasi
-TARGET_CHAT_ID = None  # Menyimpan ID Chat untuk laporan otomatis
+is_auto_active = True  # Status awal otomatisasi berjalan
 
 # ==========================================
-# FUNGSI BACA & SIMPAN CSV SKU
+# FUNGSI KELOLA USER & CSV
 # ==========================================
+def save_chat_id(chat_id):
+    """Menyimpan Chat ID user agar dapat laporan otomatis"""
+    users = get_registered_users()
+    if str(chat_id) not in users:
+        with open(USERS_FILE, "a") as f:
+            f.write(f"{chat_id}\n")
+
+def get_registered_users():
+    """Mendapatkan daftar Chat ID yang terdaftar"""
+    if not os.path.exists(USERS_FILE):
+        return []
+    with open(USERS_FILE, "r") as f:
+        return [line.strip() for line in f if line.strip()]
+
 def load_skus():
     """Membaca daftar SKU dari file CSV"""
     if not os.path.exists(CSV_FILE):
@@ -106,26 +120,14 @@ def check_single_sku_from_jaknot(sku):
 # ==========================================
 # PROSES ALL SKU & NOTIFIKASI OTOMATIS
 # ==========================================
-def process_all_skus(chat_id=None, is_manual=False):
-    global TARGET_CHAT_ID
-    
-    # Simpan chat_id jika ada
-    if chat_id:
-        TARGET_CHAT_ID = chat_id
-    else:
-        chat_id = TARGET_CHAT_ID
-
-    # Jika belum ada chat_id terdaftar sama sekali
-    if not chat_id:
-        print("[WARN] Belum ada Chat ID terdaftar untuk mengirimkan laporan.")
-        return
-
+def process_all_skus(chat_id=None, is_auto=False):
     skus = load_skus()
     if not skus:
-        bot.send_message(chat_id, "⚠️ File CSV SKU kosong atau tidak ditemukan.")
+        if chat_id:
+            bot.send_message(chat_id, "⚠️ File CSV SKU kosong atau tidak ditemukan.")
         return
 
-    if is_manual:
+    if chat_id and not is_auto:
         bot.send_message(chat_id, f"⌛ Memulai pengecekan {len(skus)} SKU...\nEstimasi delay 5–8 detik per SKU untuk keamanan IP.")
 
     report = {}
@@ -140,7 +142,7 @@ def process_all_skus(chat_id=None, is_manual=False):
         time.sleep(random.randint(5, 8))
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg = f"📊 **LAPORAN STOK JAKNOT (OTOMATIS)**\n{now}\n\n" if not is_manual else f"📊 **LAPORAN STOK JAKNOT**\n{now}\n\n"
+    msg = f"📊 **LAPORAN STOK JAKNOT (OTOMATIS)**\n{now}\n\n" if is_auto else f"📊 **LAPORAN STOK JAKNOT**\n{now}\n\n"
 
     for sku, stocks in report.items():
         msg += f"🔹 **SKU: {sku}**\n"
@@ -152,20 +154,25 @@ def process_all_skus(chat_id=None, is_manual=False):
     if not_matched:
         msg += f"❓ **SKU TIDAK MATCH / DELETED:**\n" + ", ".join(not_matched)
 
-    # Kirim pesan laporan
-    if len(msg) > 4000:
-        for x in range(0, len(msg), 4000):
-            bot.send_message(chat_id, msg[x:x+4000], parse_mode="Markdown")
-    else:
-        bot.send_message(chat_id, msg, parse_mode="Markdown")
+    # Kirim ke chat_id spesifik (jika dipicu manual) ATAU ke semua user terdaftar (jika otomatis)
+    targets = [chat_id] if chat_id and not is_auto else get_registered_users()
+    
+    for cid in targets:
+        try:
+            if len(msg) > 4000:
+                for x in range(0, len(msg), 4000):
+                    bot.send_message(cid, msg[x:x+4000], parse_mode="Markdown")
+            else:
+                bot.send_message(cid, msg, parse_mode="Markdown")
+        except Exception as e:
+            print(f"[ERROR Kirim ke {cid}]: {e}")
 
 def schedule_checker():
     """Thread penjadwalan otomatis setiap 1 jam"""
     while True:
         time.sleep(3600)  # Tunggu 1 jam
         if is_auto_active:
-            print("[INFO] Menjalankan Auto-Check Stok 1 Jam...")
-            process_all_skus(is_manual=False)
+            process_all_skus(is_auto=True)
 
 # ==========================================
 # TELEGRAM MENU & KEYBOARD
@@ -188,8 +195,7 @@ def get_main_keyboard():
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    global TARGET_CHAT_ID
-    TARGET_CHAT_ID = message.chat.id  # Catat ID Chat pengguna
+    save_chat_id(message.chat.id)  # Mendaftarkan Chat ID
     bot.send_message(
         message.chat.id,
         "👋 Selamat datang di Bot Pantau Stok Jaknot!\nID Chat Anda berhasil terdaftar untuk menerima laporan otomatis per jam.\n\nPilih menu di bawah ini:",
@@ -198,13 +204,13 @@ def send_welcome(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_listener(call):
-    global is_auto_active, TARGET_CHAT_ID
+    global is_auto_active
     chat_id = call.message.chat.id
-    TARGET_CHAT_ID = chat_id  # Catat ID Chat
+    save_chat_id(chat_id)
     
     if call.data == "check_now":
         bot.answer_callback_query(call.id, "Memulai pengecekan...")
-        threading.Thread(target=process_all_skus, args=(chat_id, True)).start()
+        threading.Thread(target=process_all_skus, args=(chat_id, False)).start()
         
     elif call.data == "toggle_auto":
         is_auto_active = not is_auto_active
@@ -215,11 +221,12 @@ def callback_listener(call):
     elif call.data == "bot_status":
         status_str = "🟢 AKTIF (Cek tiap 1 jam)" if is_auto_active else "🔴 NONAKTIF (Auto-check mati)"
         skus = load_skus()
+        users = get_registered_users()
         msg_status = (
             f"📌 **STATUS BOT STOK JAKNOT**\n\n"
             f"• **Auto-Check 1 Jam:** {status_str}\n"
             f"• **Total SKU Dipantau:** {len(skus)} SKU\n"
-            f"• **Target Chat ID:** `{TARGET_CHAT_ID}`\n"
+            f"• **Penerima Laporan:** {len(users)} Chat ID\n"
             f"• **Lokasi Cabang:** 6 Cabang Utama"
         )
         bot.send_message(chat_id, msg_status, parse_mode="Markdown", reply_markup=get_main_keyboard())
@@ -236,10 +243,8 @@ def callback_listener(call):
 
 @bot.message_handler(func=lambda msg: True)
 def text_listener(message):
-    global TARGET_CHAT_ID
     chat_id = message.chat.id
-    TARGET_CHAT_ID = chat_id
-    
+    save_chat_id(chat_id)
     state = user_states.get(chat_id)
     text = message.text.strip().upper()
 
