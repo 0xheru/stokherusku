@@ -24,7 +24,7 @@ TARGET_BRANCHES = {
 
 def send_telegram_msg(message):
     """Fungsi untuk mengirim pesan ke Telegram"""
-    url = f"https://api.telegram.org/bot{8671011621:AAGuzfVMO0itX3Qr7IVcB4VKnAe5RVxQFNg}/sendMessage"
+    url = "https://api.telegram.org/bot{8671011621:AAGuzfVMO0itX3Qr7IVcB4VKnAe5RVxQFNg}/sendMessage"
     payload = {
         "chat_id": 1342364928,
         "text": message,
