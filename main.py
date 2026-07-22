@@ -82,11 +82,11 @@ def check_single_sku_from_jaknot(sku):
             
         soup = BeautifulSoup(resp.text, 'html.parser')
         
-        # Cari tag <a> yang punya atribut href berisi '/p/' (format URL produk Jaknot)
+        # Cari link produk yang mengandung URL '/p/'
         product_link = soup.select_one('a[href*="/p/"]')
         
         if not product_link:
-            return "NOT_FOUND"  # SKU memang tidak ditemukan di pencarian Jaknot
+            return "NOT_FOUND"  # SKU tidak ditemukan
             
         product_url = product_link.get('href')
         if not product_url.startswith('http'):
@@ -96,6 +96,50 @@ def check_single_sku_from_jaknot(sku):
         prod_resp = session.get(product_url, headers=headers, timeout=12)
         if prod_resp.status_code != 200:
             return None
+            
+        prod_soup = BeautifulSoup(prod_resp.text, 'html.parser')
+        
+        # 3. Scrape data stok per cabang dari elemen kotak Informasi Stok
+        stock_data = {}
+        
+        # Cari semua elemen/box stok cabang di halaman detail
+        # Jaknot biasanya membungkusnya dalam grid/box lokasi
+        stock_boxes = prod_soup.select('div[class*="stock"], div[class*="store"], div[class*="location"]')
+        
+        # Iterasi seluruh div pencarian lokasi
+        for box in prod_soup.find_all(['div', 'li', 'tr']):
+            text_content = box.get_text(separator=' ', strip=True)
+            
+            # Cek jika baris/box mengandung nama cabang Jaknot yang valid
+            valid_branches = [
+                "Gudang Online", "Jakarta Barat", "Jakarta Pusat", "Jakarta Utara", 
+                "Jakarta Selatan", "Tangerang", "Cikupa", "Bandung", "Surabaya", "Semarang"
+            ]
+            
+            for branch in valid_branches:
+                if branch.lower() in text_content.lower() and branch not in stock_data:
+                    # Tentukan jumlah stok berdasarkan teks
+                    import re
+                    text_lower = text_content.lower()
+                    
+                    if "tersedia" in text_lower or "ready" in text_lower:
+                        stock_data[branch] = 10  # Flag angka untuk status 'Tersedia'
+                    elif "sisa" in text_lower:
+                        nums = re.findall(r'\d+', text_content)
+                        stock_data[branch] = int(nums[0]) if nums else 1
+                    elif "kosong" in text_lower or "habis" in text_lower or "pre-order" in text_lower:
+                        stock_data[branch] = 0
+                    else:
+                        # Jika ada angka langsung
+                        nums = re.findall(r'\d+', text_content)
+                        if nums:
+                            stock_data[branch] = int(nums[0])
+
+        return stock_data if stock_data else None
+
+    except Exception as e:
+        print(f"[ERROR Scrape {sku}]: {e}")
+        return None
             
         prod_soup = BeautifulSoup(prod_resp.text, 'html.parser')
         
