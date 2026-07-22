@@ -12,7 +12,6 @@ from bs4 import BeautifulSoup
 # ==========================================
 # KONFIGURASI BOT & FILE
 # ==========================================
-# Ganti dengan Token Bot Baru Anda dari BotFather jika sempat direvoke
 TELEGRAM_TOKEN = "8671011621:AAGOyNiVNP90fkY-D_4DHitQKGTWBdRxKz0"
 CSV_FILE = "daftar_sku-v2.csv"
 
@@ -24,6 +23,7 @@ LOCATIONS = [
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 user_states = {}
+is_auto_active = True  # Status awal otomatisasi berjalan
 
 # ==========================================
 # FUNGSI BACA & SIMPAN CSV SKU
@@ -68,14 +68,12 @@ def check_single_sku_from_jaknot(sku):
             
         soup = BeautifulSoup(resp.text, 'html.parser')
         
-        # Cek apakah ada produk ditemukan
         product_link = soup.select_one('a[href*="/p/"]')
         if not product_link:
             return "NOT_FOUND"
 
         stock_data = {loc: "Kosong" for loc in LOCATIONS}
         
-        # Cari kartu produk tempat ringkasan stok berada
         product_card = product_link.find_parent('div', class_=lambda c: c and ('product' in c or 'item' in c or 'card' in c))
         if not product_card:
             product_card = soup
@@ -151,7 +149,8 @@ def process_all_skus(chat_id=None):
 def schedule_checker():
     """Thread penjadwalan otomatis setiap 1 jam"""
     while True:
-        process_all_skus()
+        if is_auto_active:
+            process_all_skus()
         time.sleep(3600)
 
 # ==========================================
@@ -165,6 +164,13 @@ def get_main_keyboard():
         InlineKeyboardButton("🗑️ Hapus SKU", callback_data="del_sku")
     )
     markup.row(InlineKeyboardButton("🔍 Cek SKU Manual", callback_data="manual_sku"))
+    
+    # Tombol Kontrol & Status Bot
+    toggle_text = "🔴 Matikan Auto-Check" if is_auto_active else "🟢 Hidupkan Auto-Check"
+    markup.row(
+        InlineKeyboardButton(toggle_text, callback_data="toggle_auto"),
+        InlineKeyboardButton("📌 Status Bot", callback_data="bot_status")
+    )
     return markup
 
 @bot.message_handler(commands=['start'])
@@ -177,10 +183,30 @@ def send_welcome(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_listener(call):
+    global is_auto_active
     chat_id = call.message.chat.id
+    
     if call.data == "check_now":
         bot.answer_callback_query(call.id, "Memulai pengecekan...")
         threading.Thread(target=process_all_skus, args=(chat_id,)).start()
+        
+    elif call.data == "toggle_auto":
+        is_auto_active = not is_auto_active
+        status_txt = "diaktifkan 🟢" if is_auto_active else "dimatikan 🔴"
+        bot.answer_callback_query(call.id, f"Auto-Check 1 Jam {status_txt}")
+        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=get_main_keyboard())
+        
+    elif call.data == "bot_status":
+        status_str = "🟢 AKTIF (Cek tiap 1 jam)" if is_auto_active else "🔴 NONAKTIF (Auto-check mati)"
+        skus = load_skus()
+        msg_status = (
+            f"📌 **STATUS BOT STOK JAKNOT**\n\n"
+            f"• **Auto-Check 1 Jam:** {status_str}\n"
+            f"• **Total SKU Dipantau:** {len(skus)} SKU\n"
+            f"• **Lokasi Cabang:** 6 Cabang Utama"
+        )
+        bot.send_message(chat_id, msg_status, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        
     elif call.data == "add_sku":
         user_states[chat_id] = "WAITING_ADD"
         bot.send_message(chat_id, "Kirimkan kode SKU yang ingin ditambahkan:")
