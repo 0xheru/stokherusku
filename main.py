@@ -12,37 +12,23 @@ from bs4 import BeautifulSoup
 # ==========================================
 # KONFIGURASI BOT & FILE
 # ==========================================
-TELEGRAM_TOKEN = "8671011621:AAF94MFymPkicZYOHqfD2nvPcqHnzwBClN0"
+TELEGRAM_TOKEN = "8671011621:AAF94MFymPkicZYOHqfD2nvPcqHnzwBC1N0"
 CSV_FILE = "daftar_sku-v2.csv"
 
-# Daftar Cabang Jaknot
+# Daftar Cabang Acuan Jaknot
 LOCATIONS = [
-    "Gudang Online", "Jakarta Barat", "Jakarta Pusat", "Jakarta Utara",
-    "Jakarta Selatan", "Cikupa", "Tangerang"
+    "Gudang Online", "Jakarta Barat", "Jakarta Pusat", 
+    "Jakarta Utara", "Cikupa", "Tangerang"
 ]
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-
-# State Global Bot
-is_bot_active = True
-start_time = datetime.datetime.now()
-current_chat_id = None
-waiting_for_input = {}  # Memantau input user (tambah/hapus/cek manual)
+user_states = {}
 
 # ==========================================
-# FUNGSI HELPER & FILE CSV
+# FUNGSI BACA & SIMPAN CSV SKU
 # ==========================================
-def get_uptime():
-    """Menghitung umur bot/VPS berjalan"""
-    now = datetime.datetime.now()
-    delta = now - start_time
-    days = delta.days
-    hours, remainder = divmod(delta.seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f"{days} hari, {hours} jam, {minutes} menit"
-
 def load_skus():
-    """Membaca file CSV SKU"""
+    """Membaca daftar SKU dari file CSV"""
     if not os.path.exists(CSV_FILE):
         return []
     skus = []
@@ -50,8 +36,8 @@ def load_skus():
         reader = csv.reader(f)
         for row in reader:
             if row:
-                skus.append(row[0].strip())
-    return list(set(skus))
+                skus.append(row[0].strip().upper())
+    return list(dict.fromkeys(skus))
 
 def save_skus(sku_list):
     """Menyimpan ulang daftar SKU ke CSV"""
@@ -66,7 +52,6 @@ def save_skus(sku_list):
 def check_single_sku_from_jaknot(sku):
     """
     Melakukan scraping stok SKU dari halaman pencarian & detail Jaknot secara akurat.
-    Mengembalikan teks stok asli ("Tersedia", "Sisa X", "Kosong", dll.) per cabang acuan.
     """
     search_url = f"https://www.jakartanotebook.com/search?key={sku.lower().strip()}"
     headers = {
@@ -95,42 +80,27 @@ def check_single_sku_from_jaknot(sku):
             return None
             
         prod_soup = BeautifulSoup(prod_resp.text, 'html.parser')
+        stock_data = {loc: "Kosong" for loc in LOCATIONS}
         
-        # Inisialisasi daftar cabang resmi acuan
-        acuan_locations = [
-            "Gudang Online", "Jakarta Barat", "Jakarta Pusat", 
-            "Jakarta Utara", "Cikupa", "Tangerang"
-        ]
-        
-        stock_data = {loc: "Kosong" for loc in acuan_locations}
-        
-        # Cari kontainer/box tempat informasi stok cabang berada
-        # Elemen di Jaknot biasanya dibungkus div/box stok lokasi
         cards = prod_soup.select('div[class*="stock"], div[class*="store"], .border-rounded, div[class*="item"]')
         
         for card in cards:
             text = card.get_text(separator=' ', strip=True)
             text_lower = text.lower()
             
-            for loc in acuan_locations:
-                # Pencocokan nama lokasi acuan
+            for loc in LOCATIONS:
                 if loc.lower() in text_lower:
                     import re
-                    
-                    # 1. Cek jika ada pola angka khusus "sisa X" atau angka langsung
                     if "sisa" in text_lower:
                         nums = re.findall(r'\d+', text)
                         if nums:
                             stock_data[loc] = f"Sisa {nums[0]} pcs"
                         else:
                             stock_data[loc] = "Tersedia"
-                    # 2. Cek jika tertulis Tersedia / Ready
                     elif "tersedia" in text_lower or "ready" in text_lower:
                         stock_data[loc] = "Tersedia"
-                    # 3. Cek jika Pre-Order / Kosong
                     elif "kosong" in text_lower or "habis" in text_lower or "pre-order" in text_lower:
                         stock_data[loc] = "Kosong"
-                    # 4. Jika ada angka pcs umum
                     elif "pcs" in text_lower:
                         nums = re.findall(r'\d+', text)
                         if nums:
@@ -141,293 +111,138 @@ def check_single_sku_from_jaknot(sku):
     except Exception as e:
         print(f"[ERROR Scrape {sku}]: {e}")
         return None
-            
-        prod_soup = BeautifulSoup(prod_resp.text, 'html.parser')
-        
-        # 3. Scrape data stok per cabang dari elemen kotak Informasi Stok
-        stock_data = {}
-        
-        # Cari semua elemen/box stok cabang di halaman detail
-        # Jaknot biasanya membungkusnya dalam grid/box lokasi
-        stock_boxes = prod_soup.select('div[class*="stock"], div[class*="store"], div[class*="location"]')
-        
-        # Iterasi seluruh div pencarian lokasi
-        for box in prod_soup.find_all(['div', 'li', 'tr']):
-            text_content = box.get_text(separator=' ', strip=True)
-            
-            # Cek jika baris/box mengandung nama cabang Jaknot yang valid
-            valid_branches = [
-                "Gudang Online", "Jakarta Barat", "Jakarta Pusat", "Jakarta Utara", 
-                "Jakarta Selatan", "Tangerang", "Cikupa", "Bandung", "Surabaya", "Semarang"
-            ]
-            
-            for branch in valid_branches:
-                if branch.lower() in text_content.lower() and branch not in stock_data:
-                    # Tentukan jumlah stok berdasarkan teks
-                    import re
-                    text_lower = text_content.lower()
-                    
-                    if "tersedia" in text_lower or "ready" in text_lower:
-                        stock_data[branch] = 10  # Flag angka untuk status 'Tersedia'
-                    elif "sisa" in text_lower:
-                        nums = re.findall(r'\d+', text_content)
-                        stock_data[branch] = int(nums[0]) if nums else 1
-                    elif "kosong" in text_lower or "habis" in text_lower or "pre-order" in text_lower:
-                        stock_data[branch] = 0
-                    else:
-                        # Jika ada angka langsung
-                        nums = re.findall(r'\d+', text_content)
-                        if nums:
-                            stock_data[branch] = int(nums[0])
 
-        return stock_data if stock_data else None
-
-    except Exception as e:
-        print(f"[ERROR Scrape {sku}]: {e}")
-        return None
-            
-        prod_soup = BeautifulSoup(prod_resp.text, 'html.parser')
-        
-        # 3. Scrape data stok per cabang
-        stock_data = {}
-        
-        branches = prod_soup.select('.store-location-item, .location-stock, tr.store-row, .branch-item')
-        
-        if not branches:
-            branches = prod_soup.find_all(['tr', 'div'], class_=lambda c: c and ('store' in c or 'location' in c or 'branch' in c))
-
-        for b in branches:
-            text_full = b.text.strip()
-            if not text_full:
-                continue
-                
-            name_elem = b.select_one('.store-name, .location-name, .branch-name, td:first-child')
-            qty_elem = b.select_one('.store-stock, .stock-qty, .stock-status, td:last-child')
-            
-            if name_elem and qty_elem:
-                b_name = name_elem.text.strip()
-                b_qty_text = qty_elem.text.strip()
-                
-                import re
-                nums = re.findall(r'\d+', b_qty_text)
-                if nums:
-                    qty = int(nums[0])
-                elif any(word in b_qty_text.lower() for word in ['ready', 'ada', 'tersedia']):
-                    qty = 10
-                else:
-                    qty = 0
-                    
-                if b_name:
-                    stock_data[b_name] = qty
-
-        if not stock_data:
-            stock_data = {"Gudang Online": 1}
-
-        return stock_data
-
-    except Exception as e:
-        print(f"[ERROR Scrape {sku}]: {e}")
-        return None
+# ==========================================
+# PROSES ALL SKU & NOTIFIKASI OTOMATIS
+# ==========================================
 def process_all_skus(chat_id=None):
-    """Memproses seluruh SKU dengan delay aman 5-8 detik"""
-    target_chat = chat_id if chat_id else current_chat_id
-    if not target_chat:
-        print("[WARNING] Chat ID belum terdaftar. Kirim /start di Telegram terlebih dahulu.")
-        return
-
     skus = load_skus()
     if not skus:
-        bot.send_message(target_chat, "⚠️ Daftar SKU kosong di `daftar_sku-v2.csv`.")
+        if chat_id:
+            bot.send_message(chat_id, "⚠️ File CSV SKU kosong atau tidak ditemukan.")
         return
 
-    bot.send_message(target_chat, f"⏳ *Memulai pengecekan {len(skus)} SKU...*\n_Estimasi delay 5–8 detik per SKU untuk keamanan IP._", parse_mode="Markdown")
+    if chat_id:
+        bot.send_message(chat_id, f"⌛ Memulai pengecekan {len(skus)} SKU...\nEstimasi delay 5–8 detik per SKU untuk keamanan IP.")
 
-    ready_list = []
-    empty_list = []
-    not_found_list = []
-    warning_list = []
+    report = {}
+    not_matched = []
 
-    for idx, sku in enumerate(skus, start=1):
-        # Stop jika bot dimatikan di tengah jalan
-        if not is_bot_active and not chat_id:
-            bot.send_message(target_chat, "🛑 Pengecekan otomatis dihentikan karena status bot NONAKTIF.")
-            return
-
+    for sku in skus:
         res = check_single_sku_from_jaknot(sku)
-        
         if res == "NOT_FOUND" or res is None:
-            not_found_list.append(sku)
+            not_matched.append(sku)
         else:
-            # Analisis cabang & stok
-            active_branches = {}
-            total_stock_all = 0
-            
-            for branch, qty in res.items():
-                if qty > 0:
-                    active_branches[branch] = qty
-                    total_stock_all += qty
+            report[sku] = res
+        time.sleep(random.randint(5, 8))
 
-            if not active_branches:
-                empty_list.append(sku)
-            else:
-                # Format detail cabang ready
-                branch_str = ", ".join([f"{b}: {q}pcs" for b, q in active_branches.items()])
-                ready_list.append(f"• `{sku}` ➔ {branch_str}")
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    msg = f"📊 **LAPORAN STOK JAKNOT**\n{now}\n\n"
 
-                # Logika Warning: Stok <= 10 DAN HANYA di 1 cabang/gudang
-                if len(active_branches) == 1:
-                    branch_name, qty = list(active_branches.items())[0]
-                    if qty <= 10:
-                        warning_list.append(f"⚠️ `{sku}` sisa *{qty} pcs* HANYA di *{branch_name}*")
+    for sku, stocks in report.items():
+        msg += f"🔹 **SKU: {sku}**\n"
+        for loc, status in stocks.items():
+            icon = "✅" if status != "Kosong" else "❌"
+            msg += f"  • {loc}: {icon} {status}\n"
+        msg += "\n"
 
-        # Delay acak 5-8 detik per SKU
-        if idx < len(skus):
-            time.sleep(random.uniform(5.0, 8.0))
+    if not_matched:
+        msg += f"❓ **SKU TIDAK MATCH / DELETED:**\n" + ", ".join(not_matched)
 
-    # Construct Laporan
-    msg = f"📊 *LAPORAN STOK JAKNOT*\n_{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_\n\n"
-    
-    if ready_list:
-        msg += "✅ *SKU READY:*\n" + "\n".join(ready_list) + "\n\n"
-    if empty_list:
-        msg += "❌ *SKU KOSONG:*\n" + ", ".join([f"`{s}`" for s in empty_list]) + "\n\n"
-    if not_found_list:
-        msg += "❓ *SKU TIDAK MATCH / DELETED:*\n" + ", ".join([f"`{s}`" for s in not_found_list]) + "\n\n"
-    if warning_list:
-        msg += "🚨 *STOK MENIPIS (WARNING):*\n" + "\n".join(warning_list) + "\n\n"
+    if chat_id:
+        if len(msg) > 4000:
+            for x in range(0, len(msg), 4000):
+                bot.send_message(chat_id, msg[x:x+4000], parse_mode="Markdown")
+        else:
+            bot.send_message(chat_id, msg, parse_mode="Markdown")
 
-    bot.send_message(target_chat, msg, parse_mode="Markdown")
+def schedule_checker():
+    """Thread penjadwalan otomatis setiap 1 jam"""
+    while True:
+        process_all_skus()
+        time.sleep(3600)
 
 # ==========================================
-# MENU INLINE KEYBOARD
+# TELEGRAM MENU & KEYBOARD
 # ==========================================
-def main_menu_keyboard():
-    markup = InlineKeyboardMarkup(row_width=2)
-    
-    btn_off = InlineKeyboardButton("🔴 Matikan Bot", callback_data="btn_stop")
-    btn_on = InlineKeyboardButton("🟢 Hidupkan Bot", callback_data="btn_start")
-    btn_cek_realtime = InlineKeyboardButton("⚡ Cek Stok Sekarang", callback_data="btn_cek_now")
-    btn_cek_manual = InlineKeyboardButton("🔍 Cek SKU Manual", callback_data="btn_cek_manual")
-    btn_add_sku = InlineKeyboardButton("➕ Tambah SKU", callback_data="btn_add_sku")
-    btn_del_sku = InlineKeyboardButton("🗑️ Hapus SKU", callback_data="btn_del_sku")
-    
-    markup.add(btn_off, btn_on)
-    markup.add(btn_cek_realtime)
-    markup.add(btn_add_sku, btn_del_sku)
-    markup.add(btn_cek_manual)
+def get_main_keyboard():
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("⚡ Cek Stok Sekarang", callback_data="check_now"))
+    markup.row(
+        InlineKeyboardButton("➕ Tambah SKU", callback_data="add_sku"),
+        InlineKeyboardButton("🗑️ Hapus SKU", callback_data="del_sku")
+    )
+    markup.row(InlineKeyboardButton("🔍 Cek SKU Manual", callback_data="manual_sku"))
     return markup
 
-# ==========================================
-# COMMAND & CALLBACK TELEGRAM
-# ==========================================
-@bot.message_handler(commands=['start', 'menu'])
+@bot.message_handler(commands=['start'])
 def send_welcome(message):
-    global current_chat_id
-    current_chat_id = message.chat.id
-    
-    status_str = "🟢 *AKTIF*" if is_bot_active else "🔴 *NONAKTIF*"
-    uptime_str = get_uptime()
-    
-    text = (
-        f"🤖 *CONTROL PANEL BOT STOK JAKNOT*\n\n"
-        f"• *Status Bot:* {status_str}\n"
-        f"• *Umur VPS/Bot:* `{uptime_str}`\n\n"
-        f"Silakan pilih menu di bawah ini:"
+    bot.send_message(
+        message.chat.id,
+        "👋 Selamat datang di Bot Pantau Stok Jaknot!\nPilih menu di bawah ini:",
+        reply_markup=get_main_keyboard()
     )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 @bot.callback_query_handler(func=lambda call: True)
-def handle_inline_buttons(call):
-    global is_bot_active
+def callback_listener(call):
     chat_id = call.message.chat.id
-
-    if call.data == "btn_stop":
-        is_bot_active = False
-        bot.answer_callback_query(call.id, "Bot dimatikan!")
-        bot.send_message(chat_id, "🔴 *Bot Otomatis Diberhentikan.*", parse_mode="Markdown")
-        
-    elif call.data == "btn_start":
-        is_bot_active = True
-        bot.answer_callback_query(call.id, "Bot diaktifkan!")
-        bot.send_message(chat_id, "🟢 *Bot Otomatis Diaktifkan Kembali.*", parse_mode="Markdown")
-
-    elif call.data == "btn_cek_now":
-        bot.answer_callback_query(call.id, "Memulai cek stok realtime...")
+    if call.data == "check_now":
+        bot.answer_callback_query(call.id, "Memulai pengecekan...")
         threading.Thread(target=process_all_skus, args=(chat_id,)).start()
+    elif call.data == "add_sku":
+        user_states[chat_id] = "WAITING_ADD"
+        bot.send_message(chat_id, "Kirimkan kode SKU yang ingin ditambahkan:")
+    elif call.data == "del_sku":
+        user_states[chat_id] = "WAITING_DEL"
+        bot.send_message(chat_id, "Kirimkan kode SKU yang ingin dihapus:")
+    elif call.data == "manual_sku":
+        user_states[chat_id] = "WAITING_MANUAL"
+        bot.send_message(chat_id, "🔍 Kirimkan kode *1 SKU* yang ingin Anda cek secara manual:", parse_mode="Markdown")
 
-    elif call.data == "btn_add_sku":
-        waiting_for_input[chat_id] = "ADD_SKU"
-        bot.send_message(chat_id, "✍️ Kirimkan kode *SKU baru* yang ingin ditambahkan:")
-
-    elif call.data == "btn_del_sku":
-        waiting_for_input[chat_id] = "DEL_SKU"
-        bot.send_message(chat_id, "✍️ Kirimkan kode *SKU* yang ingin dihapus:")
-
-    elif call.data == "btn_cek_manual":
-        waiting_for_input[chat_id] = "CEK_MANUAL"
-        bot.send_message(chat_id, "🔍 Kirimkan kode *1 SKU* yang ingin Anda cek secara manual:")
-
-# Handler Penerima Text Input (Tambah/Hapus/Cek Manual)
-@bot.message_handler(func=lambda message: message.chat.id in waiting_for_input)
-def handle_user_input(message):
+@bot.message_handler(func=lambda msg: True)
+def text_listener(message):
     chat_id = message.chat.id
-    action = waiting_for_input.get(chat_id)
+    state = user_states.get(chat_id)
     text = message.text.strip().upper()
-    skus = load_skus()
 
-    if action == "ADD_SKU":
-        if text in skus:
-            bot.send_message(chat_id, f"⚠️ SKU `{text}` sudah ada di dalam daftar.", parse_mode="Markdown")
-        else:
+    if state == "WAITING_ADD":
+        skus = load_skus()
+        if text not in skus:
             skus.append(text)
             save_skus(skus)
-            bot.send_message(chat_id, f"✅ Berhasil menambah SKU `{text}` ke `daftar_sku-v2.csv`.", parse_mode="Markdown")
+            bot.reply_to(message, f"✅ SKU *{text}* berhasil ditambahkan!", parse_mode="Markdown", reply_markup=get_main_keyboard())
+        else:
+            bot.reply_to(message, f"⚠️ SKU *{text}* sudah ada di daftar.", reply_markup=get_main_keyboard())
+        user_states[chat_id] = None
 
-    elif action == "DEL_SKU":
+    elif state == "WAITING_DEL":
+        skus = load_skus()
         if text in skus:
             skus.remove(text)
             save_skus(skus)
-            bot.send_message(chat_id, f"🗑️ Berhasil menghapus SKU `{text}` dari daftar.", parse_mode="Markdown")
+            bot.reply_to(message, f"🗑️ SKU *{text}* berhasil dihapus!", parse_mode="Markdown", reply_markup=get_main_keyboard())
         else:
-            bot.send_message(chat_id, f"⚠️ SKU `{text}` tidak ditemukan di dalam daftar.", parse_mode="Markdown")
+            bot.reply_to(message, f"⚠️ SKU *{text}* tidak ditemukan di daftar.", reply_markup=get_main_keyboard())
+        user_states[chat_id] = None
 
-    elif action == "CEK_MANUAL":
-        bot.send_message(chat_id, f"🔍 Mengecek SKU `{text}`...", parse_mode="Markdown")
-        res = check_single_sku_from_jaknot(text)
+    elif state == "WAITING_MANUAL":
+        bot.send_message(chat_id, f"🔍 Mengecekan SKU *{text}*...", parse_mode="Markdown")
+        stock_result = check_single_sku_from_jaknot(text)
         
-        if res == "NOT_FOUND" or res is None:
-            bot.send_message(chat_id, f"❌ SKU `{text}` tidak ditemukan/tidak match di Jaknot.", parse_mode="Markdown")
+        if isinstance(stock_result, dict):
+            msg = f"📌 *DETAIL STOK MANUAL SKU: {text}*\n\n"
+            for loc, status in stock_result.items():
+                icon = "❌" if status == "Kosong" else "✅"
+                msg += f"• *{loc}:* {icon} {status}\n"
+            bot.reply_to(message, msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        elif stock_result == "NOT_FOUND":
+            bot.reply_to(message, f"❌ SKU *{text}* tidak ditemukan/tidak match di Jaknot.", parse_mode="Markdown", reply_markup=get_main_keyboard())
         else:
-            branches_info = []
-            for branch in LOCATIONS:
-                qty = res.get(branch, 0)
-                status = f"✅ {qty} pcs" if qty > 0 else "❌ Kosong"
-                branches_info.append(f"• *{branch}:* {status}")
-            
-            out = f"📌 *DETAIL STOK MANUAL SKU:* `{text}`\n\n" + "\n".join(branches_info)
-            bot.send_message(chat_id, out, parse_mode="Markdown")
+            bot.reply_to(message, f"⚠️ Gagal mengambil data stok untuk SKU *{text}*.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+        
+        user_states[chat_id] = None
 
-    del waiting_for_input[chat_id]
-
-# ==========================================
-# JADWAL OTOMATIS BERKALA (EVERY 1 HOUR)
-# ==========================================
-def schedule_loop():
-    while True:
-        time.sleep(3600)  # Cek setiap 1 jam (3600 detik)
-        if is_bot_active:
-            print("[INFO] Menjalankan pengecekan otomatis berkala...")
-            process_all_skus()
-
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
 if __name__ == "__main__":
     print("[INFO] Bot Stok Jaknot Interaktif Siap...")
-    
-    # Run Background Schedule
-    t = threading.Thread(target=schedule_loop, daemon=True)
-    t.start()
-    
-    # Run Telegram Listener
+    threading.Thread(target=schedule_checker, daemon=True).start()
     bot.infinity_polling()
