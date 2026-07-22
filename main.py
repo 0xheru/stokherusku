@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 # ==========================================
 # KONFIGURASI BOT & FILE
 # ==========================================
-TELEGRAM_TOKEN = "8671011621:AAF94MFymPkicZYOHqfD2nvPcqHnzwBC1N0"
+TELEGRAM_TOKEN = "8671011621:AAGOyNiVNP90fkY-D_4DHitQKGTWBdRxKz0"
 CSV_FILE = "daftar_sku-v2.csv"
 
 # Daftar Cabang Acuan Jaknot
