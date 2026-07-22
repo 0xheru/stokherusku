@@ -65,7 +65,8 @@ def save_skus(sku_list):
 # ==========================================
 def check_single_sku_from_jaknot(sku):
     """
-    Melakukan scraping stok SKU dari halaman pencarian & detail Jaknot
+    Melakukan scraping stok SKU dari halaman pencarian & detail Jaknot secara akurat.
+    Mengembalikan teks stok asli ("Tersedia", "Sisa X", "Kosong", dll.) per cabang acuan.
     """
     search_url = f"https://www.jakartanotebook.com/search?key={sku.lower().strip()}"
     headers = {
@@ -74,28 +75,72 @@ def check_single_sku_from_jaknot(sku):
     }
     
     try:
-        # 1. Cari produk berdasarkan SKU
         session = requests.Session()
         resp = session.get(search_url, headers=headers, timeout=12)
         if resp.status_code != 200:
             return None
             
         soup = BeautifulSoup(resp.text, 'html.parser')
-        
-        # Cari link produk yang mengandung URL '/p/'
         product_link = soup.select_one('a[href*="/p/"]')
         
         if not product_link:
-            return "NOT_FOUND"  # SKU tidak ditemukan
+            return "NOT_FOUND"
             
         product_url = product_link.get('href')
         if not product_url.startswith('http'):
             product_url = "https://www.jakartanotebook.com" + product_url
 
-        # 2. Buka halaman detail produk
         prod_resp = session.get(product_url, headers=headers, timeout=12)
         if prod_resp.status_code != 200:
             return None
+            
+        prod_soup = BeautifulSoup(prod_resp.text, 'html.parser')
+        
+        # Inisialisasi daftar cabang resmi acuan
+        acuan_locations = [
+            "Gudang Online", "Jakarta Barat", "Jakarta Pusat", 
+            "Jakarta Utara", "Cikupa", "Tangerang"
+        ]
+        
+        stock_data = {loc: "Kosong" for loc in acuan_locations}
+        
+        # Cari kontainer/box tempat informasi stok cabang berada
+        # Elemen di Jaknot biasanya dibungkus div/box stok lokasi
+        cards = prod_soup.select('div[class*="stock"], div[class*="store"], .border-rounded, div[class*="item"]')
+        
+        for card in cards:
+            text = card.get_text(separator=' ', strip=True)
+            text_lower = text.lower()
+            
+            for loc in acuan_locations:
+                # Pencocokan nama lokasi acuan
+                if loc.lower() in text_lower:
+                    import re
+                    
+                    # 1. Cek jika ada pola angka khusus "sisa X" atau angka langsung
+                    if "sisa" in text_lower:
+                        nums = re.findall(r'\d+', text)
+                        if nums:
+                            stock_data[loc] = f"Sisa {nums[0]} pcs"
+                        else:
+                            stock_data[loc] = "Tersedia"
+                    # 2. Cek jika tertulis Tersedia / Ready
+                    elif "tersedia" in text_lower or "ready" in text_lower:
+                        stock_data[loc] = "Tersedia"
+                    # 3. Cek jika Pre-Order / Kosong
+                    elif "kosong" in text_lower or "habis" in text_lower or "pre-order" in text_lower:
+                        stock_data[loc] = "Kosong"
+                    # 4. Jika ada angka pcs umum
+                    elif "pcs" in text_lower:
+                        nums = re.findall(r'\d+', text)
+                        if nums:
+                            stock_data[loc] = f"{nums[0]} pcs"
+
+        return stock_data
+
+    except Exception as e:
+        print(f"[ERROR Scrape {sku}]: {e}")
+        return None
             
         prod_soup = BeautifulSoup(prod_resp.text, 'html.parser')
         
