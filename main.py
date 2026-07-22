@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 # ==========================================
 # KONFIGURASI BOT & FILE
 # ==========================================
+# Ganti dengan Token Bot Baru Anda dari BotFather jika sempat direvoke
 TELEGRAM_TOKEN = "8671011621:AAGOyNiVNP90fkY-D_4DHitQKGTWBdRxKz0"
 CSV_FILE = "daftar_sku-v2.csv"
 
@@ -51,7 +52,7 @@ def save_skus(sku_list):
 # ==========================================
 def check_single_sku_from_jaknot(sku):
     """
-    Melakukan scraping stok SKU dari halaman pencarian & detail Jaknot secara akurat.
+    Scraping stok SKU langsung dari kartu produk di halaman pencarian Jaknot.
     """
     search_url = f"https://www.jakartanotebook.com/search?key={sku.lower().strip()}"
     headers = {
@@ -66,45 +67,36 @@ def check_single_sku_from_jaknot(sku):
             return None
             
         soup = BeautifulSoup(resp.text, 'html.parser')
-        product_link = soup.select_one('a[href*="/p/"]')
         
+        # Cek apakah ada produk ditemukan
+        product_link = soup.select_one('a[href*="/p/"]')
         if not product_link:
             return "NOT_FOUND"
-            
-        product_url = product_link.get('href')
-        if not product_url.startswith('http'):
-            product_url = "https://www.jakartanotebook.com" + product_url
 
-        prod_resp = session.get(product_url, headers=headers, timeout=12)
-        if prod_resp.status_code != 200:
-            return None
-            
-        prod_soup = BeautifulSoup(prod_resp.text, 'html.parser')
         stock_data = {loc: "Kosong" for loc in LOCATIONS}
         
-        cards = prod_soup.select('div[class*="stock"], div[class*="store"], .border-rounded, div[class*="item"]')
-        
-        for card in cards:
-            text = card.get_text(separator=' ', strip=True)
-            text_lower = text.lower()
-            
+        # Cari kartu produk tempat ringkasan stok berada
+        product_card = product_link.find_parent('div', class_=lambda c: c and ('product' in c or 'item' in c or 'card' in c))
+        if not product_card:
+            product_card = soup
+
+        lines = [line.strip() for line in product_card.get_text(separator='\n').split('\n') if line.strip()]
+
+        for i, line in enumerate(lines):
             for loc in LOCATIONS:
-                if loc.lower() in text_lower:
+                if loc.lower() in line.lower():
+                    context_text = " ".join(lines[i:i+3]).lower()
+                    
                     import re
-                    if "sisa" in text_lower:
-                        nums = re.findall(r'\d+', text)
-                        if nums:
-                            stock_data[loc] = f"Sisa {nums[0]} pcs"
-                        else:
-                            stock_data[loc] = "Tersedia"
-                    elif "tersedia" in text_lower or "ready" in text_lower:
+                    if "sisa" in context_text:
+                        nums = re.findall(r'\d+', context_text)
+                        stock_data[loc] = f"Sisa {nums[0]} pcs" if nums else "Tersedia"
+                    elif "tersedia" in context_text or "ready" in context_text:
                         stock_data[loc] = "Tersedia"
-                    elif "kosong" in text_lower or "habis" in text_lower or "pre-order" in text_lower:
+                    elif "on restock" in context_text:
+                        stock_data[loc] = "On Restock"
+                    elif "habis" in context_text or "kosong" in context_text or "pre order" in context_text or "pre-order" in context_text:
                         stock_data[loc] = "Kosong"
-                    elif "pcs" in text_lower:
-                        nums = re.findall(r'\d+', text)
-                        if nums:
-                            stock_data[loc] = f"{nums[0]} pcs"
 
         return stock_data
 
@@ -142,7 +134,7 @@ def process_all_skus(chat_id=None):
     for sku, stocks in report.items():
         msg += f"🔹 **SKU: {sku}**\n"
         for loc, status in stocks.items():
-            icon = "✅" if status != "Kosong" else "❌"
+            icon = "✅" if status in ["Tersedia"] or "Sisa" in status else "❌"
             msg += f"  • {loc}: {icon} {status}\n"
         msg += "\n"
 
@@ -232,7 +224,7 @@ def text_listener(message):
         if isinstance(stock_result, dict):
             msg = f"📌 *DETAIL STOK MANUAL SKU: {text}*\n\n"
             for loc, status in stock_result.items():
-                icon = "❌" if status == "Kosong" else "✅"
+                icon = "✅" if status in ["Tersedia"] or "Sisa" in status else "❌"
                 msg += f"• *{loc}:* {icon} {status}\n"
             bot.reply_to(message, msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
         elif stock_result == "NOT_FOUND":
