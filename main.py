@@ -11,7 +11,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # ==========================================
 # KONFIGURASI BOT & FILE
 # ==========================================
-TELEGRAM_TOKEN = "8671011621:AAGuzfVM0itX3Qr7IVcB4VKnAe5RVxQFNg"
+TELEGRAM_TOKEN = "8671011621:AAF94MFymPkicZYOHqfD2nvPcqHnzwBClN0"
 CSV_FILE = "daftar_sku-v2.csv"
 
 # Daftar Cabang Jaknot
