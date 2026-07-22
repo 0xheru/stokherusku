@@ -7,6 +7,7 @@ import threading
 import requests
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from bs4 import BeautifulSoup
 
 # ==========================================
 # KONFIGURASI BOT & FILE
@@ -64,24 +65,68 @@ def save_skus(sku_list):
 # ==========================================
 def check_single_sku_from_jaknot(sku):
     """
-    Mengambil data stok 1 SKU dari API/Web Jaknot.
-    Mengembalikan dict cabang & stok, atau None jika tidak match/deleted.
+    Melakukan scraping stok SKU dari halaman pencarian & detail Jaknot
     """
-    url = f"https://www.jakartanotebook.com/api/product/detail/{sku}" # Disesuaikan dengan endpoint API/web Jaknot
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    search_url = f"https://www.jakartanotebook.com/search?key={sku.lower()}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
     
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            # Asumsi struktur JSON Jaknot (sesuaikan jika ada perbedaan key)
-            stock_data = data.get('stocks', {}) 
-            return stock_data
-        elif response.status_code == 404:
-            return "NOT_FOUND"
-        else:
+        # 1. Cari produk berdasarkan SKU
+        resp = requests.get(search_url, headers=headers, timeout=10)
+        if resp.status_code != 200:
             return None
-    except Exception:
+            
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        
+        # Cari elemen produk pertama di hasil pencarian
+        product_link = soup.select_one('a.product-list__title') or soup.select_one('.product-list a')
+        
+        if not product_link:
+            return "NOT_FOUND"  # SKU tidak ditemukan di pencarian Jaknot
+            
+        product_url = product_link.get('href')
+        if not product_url.startswith('http'):
+            product_url = "https://www.jakartanotebook.com" + product_url
+
+        # 2. Buka halaman detail produk
+        prod_resp = requests.get(product_url, headers=headers, timeout=10)
+        if prod_resp.status_code != 200:
+            return None
+            
+        prod_soup = BeautifulSoup(prod_resp.text, 'html.parser')
+        
+        # 3. Scrape data stok per cabang/gudang
+        stock_data = {}
+        branches = prod_soup.select('.store-location-item') or prod_soup.select('tr.store-row')
+        
+        if not branches:
+            branches = prod_soup.find_all('div', class_='location-stock')
+
+        for b in branches:
+            name_elem = b.select_one('.store-name') or b.select_one('.location-name')
+            qty_elem = b.select_one('.store-stock') or b.select_one('.stock-qty')
+            
+            if name_elem and qty_elem:
+                b_name = name_elem.text.strip()
+                b_qty_text = qty_elem.text.strip()
+                
+                import re
+                nums = re.findall(r'\d+', b_qty_text)
+                if nums:
+                    qty = int(nums[0])
+                elif "ready" in b_qty_text.lower() or "ada" in b_qty_text.lower():
+                    qty = 99
+                else:
+                    qty = 0
+                    
+                stock_data[b_name] = qty
+
+        return stock_data
+
+    except Exception as e:
+        print(f"[ERROR Scrape {sku}]: {e}")
         return None
 
 def process_all_skus(chat_id=None):
