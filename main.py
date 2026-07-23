@@ -1,4 +1,5 @@
 import os
+import re
 import csv
 import time
 import random
@@ -89,7 +90,6 @@ def check_single_sku_from_jaknot(sku):
             for loc in LOCATIONS:
                 if loc.lower() in line.lower():
                     context_text = " ".join(lines[i:i+3]).lower()
-                    import re
                     if "sisa" in context_text:
                         nums = re.findall(r'\d+', context_text)
                         stock_data[loc] = f"Sisa {nums[0]} pcs" if nums else "Tersedia"
@@ -110,37 +110,34 @@ def check_single_sku_from_jaknot(sku):
 # ==========================================
 def should_report_sku(stocks):
     """
-    Menentukan apakah SKU perlu dilaporkan berdasarkan syarat Om:
-    1. Gudang online Tersedia -> SKIP (TIDAK LAPOR)
-    2. Semua cabang kosong -> LAPOR
-    3. Gudang online kosong, tapi ada cabang yang stoknya di bawah 11 pcs (Sisa X pcs) -> LAPOR
-    4. Jika ada cabang yang statusnya 'Tersedia' (tanpa batasan pcs) -> SKIP
+    Syarat Lapor:
+    1. Gudang Online Tersedia -> SKIP (TIDAK LAPOR)
+    2. Semua Cabang Kosong -> LAPOR
+    3. Gudang Online Kosong, tapi ada cabang yang stoknya di bawah 11 pcs (Sisa X pcs) -> LAPOR
+    4. Ada cabang yang statusnya 'Tersedia' (stok banyak) -> SKIP
     """
     gudang_online = stocks.get("Gudang Online", "Kosong")
     
-    # Jika Gudang Online Tersedia -> Jangan dilaporkan
+    # Jika Gudang Online Ready -> Jangan dilaporkan
     if gudang_online == "Tersedia" or "Sisa" in gudang_online:
         return False
         
-    # Cek cabang lainnya
     branch_statuses = [v for k, v in stocks.items() if k != "Gudang Online"]
     
-    # Jika ada salah satu cabang yang 'Tersedia' (stok banyak) -> Jangan dilaporkan
+    # Jika ada cabang lain yang masih "Tersedia" melimpah -> Jangan dilaporkan
     if "Tersedia" in branch_statuses:
         return False
 
-    # Hitung kondisi cabang
     all_empty = all(s in ["Kosong", "On Restock"] for s in branch_statuses)
     
-    # Jika semua cabang kosong -> Laporkan!
+    # Jika Gudang Online & SEMUA Cabang Kosong -> Laporkan!
     if all_empty:
         return True
         
-    # Cek apakah cabang yang sisa stoknya semuanya < 11 pcs
+    # Cek cabang yang sisa stoknya di bawah 11 pcs
     has_low_stock = False
     for s in branch_statuses:
         if "Sisa" in s:
-            import re
             nums = re.findall(r'\d+', s)
             if nums and int(nums[0]) < 11:
                 has_low_stock = True
@@ -162,7 +159,7 @@ def process_all_skus(chat_id=None, is_auto=False):
             return
 
         if chat_id and not is_auto:
-            bot.send_message(chat_id, f"⌛ Memulai pengecekan {len(skus)} SKU...\nFilter: Menampilkan SKU Kosong & Stok < 11 pcs.")
+            bot.send_message(chat_id, f"⌛ Memulai pengecekan {len(skus)} SKU...\nFilter: Menampilkan SKU Kosong Total & Stok < 11 pcs.")
 
         filtered_report = {}
         not_matched = []
@@ -173,7 +170,6 @@ def process_all_skus(chat_id=None, is_auto=False):
                 if res == "NOT_FOUND" or res is None:
                     not_matched.append(sku)
                 else:
-                    # Filter sesuai aturan baru Om
                     if should_report_sku(res):
                         filtered_report[sku] = res
             except Exception:
