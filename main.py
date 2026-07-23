@@ -1,6 +1,7 @@
 import os
 import re
 import csv
+import json
 import time
 import random
 import datetime
@@ -16,6 +17,7 @@ from bs4 import BeautifulSoup
 TELEGRAM_TOKEN = "8671011621:AAGOyNiVNP90fkY-D_4DHitQKGTWBdRxKz0"
 CSV_FILE = "daftar_sku-v2.csv"
 USERS_FILE = "registered_users.txt"
+STATE_FILE = "bot_state.json"  # File database baru untuk memori bot
 
 LOCATIONS = [
     "Gudang Online", "Jakarta Barat", "Jakarta Pusat", 
@@ -27,7 +29,7 @@ user_states = {}
 is_auto_active = True
 
 # ==========================================
-# FUNGSI KELOLA USER & CSV
+# FUNGSI KELOLA DATA & MEMORI BOT
 # ==========================================
 def save_chat_id(chat_id):
     users = get_registered_users()
@@ -58,8 +60,26 @@ def save_skus(sku_list):
         for sku in sku_list:
             writer.writerow([sku])
 
+def load_state():
+    """Membaca memori histori bot (harga & stok)"""
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except:
+            pass
+    return {"oos_since": {}, "last_price": {}, "price_alerts": {}}
+
+def save_state(state):
+    """Menyimpan memori histori bot (harga & stok)"""
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+def format_rupiah(angka):
+    return f"Rp.{angka:,}".replace(',', '.')
+
 # ==========================================
-# LOGIKA SCRAPING / CEK STOK JAKNOT
+# LOGIKA SCRAPING / CEK STOK & HARGA
 # ==========================================
 def check_single_sku_from_jaknot(sku):
     search_url = f"https://www.jakartanotebook.com/search?key={sku.lower().strip()}"
@@ -85,8 +105,19 @@ def check_single_sku_from_jaknot(sku):
             product_card = soup
 
         lines = [line.strip() for line in product_card.get_text(separator='\n').split('\n') if line.strip()]
+        price_int = 0
 
         for i, line in enumerate(lines):
+            # Cek Harga
+            if price_int == 0:
+                price_match = re.search(r'Rp\.?\s*([\d\.]+)', line)
+                if price_match:
+                    try:
+                        price_int = int(price_match.group(1).replace('.', ''))
+                    except:
+                        pass
+            
+            # Cek Stok
             for loc in LOCATIONS:
                 if loc.lower() in line.lower():
                     context_text = " ".join(lines[i:i+3]).lower()
@@ -100,41 +131,28 @@ def check_single_sku_from_jaknot(sku):
                     elif "habis" in context_text or "kosong" in context_text or "pre order" in context_text or "pre-order" in context_text:
                         stock_data[loc] = "Kosong"
 
-        return stock_data
+        return {"stocks": stock_data, "price": price_int}
     except Exception as e:
         print(f"[ERROR Scrape {sku}]: {e}")
         return None
 
 # ==========================================
-# LOGIKA FILTER LAPORAN PERMINTAAN OM
+# LOGIKA FILTER LAPORAN
 # ==========================================
 def should_report_sku(stocks):
-    """
-    Syarat Lapor:
-    1. Gudang Online Tersedia -> SKIP (TIDAK LAPOR)
-    2. Semua Cabang Kosong -> LAPOR
-    3. Gudang Online Kosong, tapi ada cabang yang stoknya di bawah 11 pcs (Sisa X pcs) -> LAPOR
-    4. Ada cabang yang statusnya 'Tersedia' (stok banyak) -> SKIP
-    """
+    """Filter khusus stok kritis dan kosong total."""
     gudang_online = stocks.get("Gudang Online", "Kosong")
-    
-    # Jika Gudang Online Ready -> Jangan dilaporkan
     if gudang_online == "Tersedia" or "Sisa" in gudang_online:
         return False
         
     branch_statuses = [v for k, v in stocks.items() if k != "Gudang Online"]
-    
-    # Jika ada cabang lain yang masih "Tersedia" melimpah -> Jangan dilaporkan
     if "Tersedia" in branch_statuses:
         return False
 
     all_empty = all(s in ["Kosong", "On Restock"] for s in branch_statuses)
-    
-    # Jika Gudang Online & SEMUA Cabang Kosong -> Laporkan!
     if all_empty:
         return True
         
-    # Cek cabang yang sisa stoknya di bawah 11 pcs
     has_low_stock = False
     for s in branch_statuses:
         if "Sisa" in s:
@@ -148,21 +166,25 @@ def should_report_sku(stocks):
     return False
 
 # ==========================================
-# PROSES ALL SKU & NOTIFIKASI OTOMATIS
+# PROSES ALL SKU & TRACKING CERDAS
 # ==========================================
 def process_all_skus(chat_id=None, is_auto=False):
     try:
         skus = load_skus()
         if not skus:
             if chat_id:
-                bot.send_message(chat_id, "⚠️ File CSV SKU kosong atau tidak ditemukan.")
+                bot.send_message(chat_id, "⚠️ File CSV SKU kosong.")
             return
 
         if chat_id and not is_auto:
-            bot.send_message(chat_id, f"⌛ Memulai pengecekan {len(skus)} SKU...\nFilter: Menampilkan SKU Kosong Total & Stok < 11 pcs.")
+            bot.send_message(chat_id, f"⌛ Memulai pengecekan {len(skus)} SKU...\nMelakukan update Harga & Stok Kritis.")
 
+        state = load_state()
         filtered_report = {}
         not_matched = []
+        
+        current_date_str = datetime.datetime.now().strftime("%d/%m/%Y")
+        current_dt = datetime.datetime.now()
 
         for sku in skus:
             try:
@@ -170,21 +192,85 @@ def process_all_skus(chat_id=None, is_auto=False):
                 if res == "NOT_FOUND" or res is None:
                     not_matched.append(sku)
                 else:
-                    if should_report_sku(res):
-                        filtered_report[sku] = res
+                    stocks = res["stocks"]
+                    price = res["price"]
+                    
+                    is_critical = should_report_sku(stocks)
+                    is_ready_again = False
+                    oos_date = None
+                    alert_text = ""
+
+                    # 1. TRACKING STOK KOSONG -> READY KEMBALI
+                    if is_critical:
+                        if sku not in state["oos_since"]:
+                            state["oos_since"][sku] = current_date_str
+                    else:
+                        if sku in state["oos_since"]:
+                            is_ready_again = True
+                            oos_date = state["oos_since"][sku]
+                            del state["oos_since"][sku]
+
+                    # 2. TRACKING KENAIKAN HARGA
+                    old_price = state["last_price"].get(sku, 0)
+                    if old_price > 0 and price > old_price:
+                        # Harga Naik!
+                        state["price_alerts"][sku] = {
+                            "old": old_price,
+                            "new": price,
+                            "date": current_dt.strftime("%Y-%m-%d")
+                        }
+                    
+                    if price > 0:
+                        state["last_price"][sku] = price
+
+                    # Cek Notifikasi Harga (Berlaku 3 Hari)
+                    has_price_alert = False
+                    if sku in state["price_alerts"]:
+                        alert_info = state["price_alerts"][sku]
+                        alert_dt = datetime.datetime.strptime(alert_info["date"], "%Y-%m-%d")
+                        if (current_dt - alert_dt).days > 3:
+                            del state["price_alerts"][sku]
+                        else:
+                            has_price_alert = True
+                            alert_text = f"Pringatan Harga Naik dari {format_rupiah(alert_info['old'])} saat ini menjadi {format_rupiah(alert_info['new'])}"
+
+                    # Masukkan ke laporan jika Kritis / Ready Kembali / Harga Naik
+                    if is_critical or is_ready_again or has_price_alert:
+                        filtered_report[sku] = {
+                            "stocks": stocks,
+                            "is_ready_again": is_ready_again,
+                            "oos_date": oos_date,
+                            "alert_text": alert_text
+                        }
+
             except Exception:
                 not_matched.append(sku)
             time.sleep(random.randint(3, 5))
 
+        save_state(state) # Simpan database bot
+
+        # ========================================
+        # FORMATTING PESAN TELEGRAM
+        # ========================================
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         if not filtered_report and not not_matched:
-            msg = f"📊 **LAPORAN STOK JAKNOT**\n{now}\n\n✅ **Semua SKU Aman!** Tidak ada SKU yang kosong total atau menipis (<11 pcs)."
+            msg = f"📊 **LAPORAN STOK JAKNOT**\n{now}\n\n✅ **Semua SKU Aman!** Tidak ada SKU kritis, stok ready kembali, atau peringatan harga naik."
         else:
-            msg = f"📊 **LAPORAN STOK KRITIS & KOSONG**\n{now}\n\n"
-            for sku, stocks in filtered_report.items():
+            msg = f"📊 **LAPORAN UPDATE JAKNOT**\n{now}\n\n"
+            for sku, data in filtered_report.items():
                 msg += f"🔹 **SKU: {sku}**\n"
-                for loc, status in stocks.items():
+                
+                # Tanda Ready Kembali
+                if data["is_ready_again"]:
+                    msg += f"    ✅ Kosong sejak tanggal {data['oos_date']}, Saat ini sudah ready kembali.\n"
+                
+                # Tanda Harga Naik
+                if data["alert_text"]:
+                    msg += f"    ⚠️ {data['alert_text']}\n"
+
+                # Status Cabang
+                for loc, status in data["stocks"].items():
                     icon = "✅" if status in ["Tersedia"] or "Sisa" in status else "❌"
                     msg += f"  • {loc}: {icon} {status}\n"
                 msg += "\n"
@@ -207,12 +293,12 @@ def process_all_skus(chat_id=None, is_auto=False):
         print(f"[CRITICAL ERROR]: {general_err}")
 
 def schedule_checker():
-    """Thread penjadwalan otomatis setiap 1 jam"""
+    """Thread penjadwalan otomatis setiap 2 jam (7200 detik)"""
     while True:
         if is_auto_active:
-            print("[INFO] Jalankan Pengecekan Otomatis (Filtered)...")
+            print("[INFO] Jalankan Pengecekan Otomatis (Per 2 Jam)...")
             process_all_skus(is_auto=True)
-        time.sleep(3600)
+        time.sleep(7200)
 
 # ==========================================
 # TELEGRAM MENU & KEYBOARD
@@ -238,7 +324,7 @@ def send_welcome(message):
     save_chat_id(message.chat.id)
     bot.send_message(
         message.chat.id,
-        "👋 Selamat datang di Bot Pantau Stok Jaknot!\nID Chat Anda berhasil terdaftar untuk menerima laporan otomatis per jam.\n\nPilih menu di bawah ini:",
+        "👋 Selamat datang di Bot Pantau Stok Jaknot!\nID Chat Anda berhasil terdaftar untuk menerima laporan otomatis per 2 jam.\n\nPilih menu di bawah ini:",
         reply_markup=get_main_keyboard()
     )
 
@@ -255,19 +341,19 @@ def callback_listener(call):
     elif call.data == "toggle_auto":
         is_auto_active = not is_auto_active
         status_txt = "diaktifkan 🟢" if is_auto_active else "dimatikan 🔴"
-        bot.answer_callback_query(call.id, f"Auto-Check 1 Jam {status_txt}")
+        bot.answer_callback_query(call.id, f"Auto-Check 2 Jam {status_txt}")
         bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=get_main_keyboard())
         
     elif call.data == "bot_status":
-        status_str = "🟢 AKTIF (Cek tiap 1 jam)" if is_auto_active else "🔴 NONAKTIF (Auto-check mati)"
+        status_str = "🟢 AKTIF (Cek tiap 2 jam)" if is_auto_active else "🔴 NONAKTIF (Auto-check mati)"
         skus = load_skus()
         users = get_registered_users()
         msg_status = (
             f"📌 **STATUS BOT STOK JAKNOT**\n\n"
-            f"• **Auto-Check 1 Jam:** {status_str}\n"
+            f"• **Auto-Check 2 Jam:** {status_str}\n"
             f"• **Total SKU Dipantau:** {len(skus)} SKU\n"
             f"• **Penerima Laporan:** {len(users)} Chat ID\n"
-            f"• **Filter Laporan:** Kosong & Stok < 11 Pcs\n"
+            f"• **Fitur Tambahan:** Deteksi Harga Naik (3 Hari) & Info Ready Kembali\n"
             f"• **Lokasi Cabang:** 6 Cabang Utama"
         )
         bot.send_message(chat_id, msg_status, parse_mode="Markdown", reply_markup=get_main_keyboard())
@@ -311,18 +397,22 @@ def text_listener(message):
 
     elif state == "WAITING_MANUAL":
         bot.send_message(chat_id, f"🔍 Mengecekan SKU *{text}*...", parse_mode="Markdown")
-        stock_result = check_single_sku_from_jaknot(text)
+        res = check_single_sku_from_jaknot(text)
         
-        if isinstance(stock_result, dict):
-            msg = f"📌 *DETAIL STOK MANUAL SKU: {text}*\n\n"
-            for loc, status in stock_result.items():
+        if res and res != "NOT_FOUND":
+            stocks = res["stocks"]
+            price = res["price"]
+            msg = f"📌 *DETAIL STOK MANUAL SKU: {text}*\n"
+            msg += f"💰 *Harga Saat Ini:* {format_rupiah(price) if price > 0 else 'Tidak ditemukan'}\n\n"
+            
+            for loc, status in stocks.items():
                 icon = "✅" if status in ["Tersedia"] or "Sisa" in status else "❌"
                 msg += f"• *{loc}:* {icon} {status}\n"
             bot.reply_to(message, msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
-        elif stock_result == "NOT_FOUND":
+        elif res == "NOT_FOUND":
             bot.reply_to(message, f"❌ SKU *{text}* tidak ditemukan/tidak match di Jaknot.", parse_mode="Markdown", reply_markup=get_main_keyboard())
         else:
-            bot.reply_to(message, f"⚠️ Gagal mengambil data stok untuk SKU *{text}*.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+            bot.reply_to(message, f"⚠️ Gagal mengambil data untuk SKU *{text}*.", parse_mode="Markdown", reply_markup=get_main_keyboard())
         
         user_states[chat_id] = None
 
